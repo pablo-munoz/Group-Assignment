@@ -1,92 +1,195 @@
 # File: pages/3_Comparison_Dashboard.py
-import streamlit as st
+# --------------------------------------------------------------
+# Enhanced Comparison Dashboard (Iteration 2 — trimmed imports)
+# --------------------------------------------------------------
+"""
+Compare multiple assets across performance and risk dimensions.
+Adds risk‑return scatter, optional log‑scale, correlation heat‑map and
+consistent colour mapping for cognitive continuity.
+Only uses libraries listed in *requirements.txt* (streamlit, yfinance,
+plotly, pandas, numpy).
+"""
+
+from datetime import date, timedelta
+import math
+
+import numpy as np
 import pandas as pd
 import plotly.express as px
-from datetime import datetime, timedelta
-from utils import load_data
+import streamlit as st
+import yfinance as yf
 
+from utils import load_data  # shared, cached data fetcher
+
+# ─── Page config & header ─────────────────────────────────────
 st.set_page_config(page_title="Comparison Dashboard", page_icon="🔎")
 st.subheader("Comparison Dashboard")
 
-# Sidebar inputs
-tickers_input = st.sidebar.text_input(
-    "Enter multiple tickers (comma-separated):", 
-    value="AAPL, MSFT, GOOGL"
-)
-tickers = [t.strip().upper() for t in tickers_input.replace(";", ",").split(",") if t.strip()]
-# Remove duplicate or empty entries
-tickers = sorted(set(filter(None, tickers)))
-if len(tickers) == 0:
-    st.info("Enter at least one ticker symbol to compare.")
-    st.stop()
-if len(tickers) > 5:
-    st.sidebar.warning("Limiting to first 5 tickers for clarity.")
-    tickers = tickers[:5]
+# ─── Sidebar inputs ──────────────────────────────────────────
+_get_state = lambda k, d: st.session_state.get(k, d)
 
-# Date range selection (default 1 year)
-today = datetime.today().date()
-default_start = today - timedelta(days=365)
-start_date = st.sidebar.date_input("Start Date:", default_start)
-end_date = st.sidebar.date_input("End Date:", today)
+tickers_input = st.sidebar.text_input(
+    "Enter multiple tickers (comma-separated):",
+    value=_get_state("tickers_input", "AAPL, MSFT, GOOGL"),
+)
+st.session_state.tickers_input = tickers_input
+
+raw_list = [t.strip().upper() for t in tickers_input.replace(";", ",").split(",") if t.strip()]
+tickers = sorted(set(raw_list))
+
+if not tickers:
+    st.info("Enter at least one ticker to compare.")
+    st.stop()
+
+MAX_TICKERS = 5
+if len(tickers) > MAX_TICKERS:
+    st.sidebar.warning(f"Showing first {MAX_TICKERS} tickers for clarity.")
+    tickers = tickers[:MAX_TICKERS]
+
+# Date range (default 1‑year)
+today = date.today()
+def_start = today - timedelta(days=365)
+start_date = st.sidebar.date_input("Start Date:", _get_state("start_date", def_start))
+end_date = st.sidebar.date_input("End Date:", _get_state("end_date", today))
+
 if start_date > end_date:
     st.sidebar.error("Start date must be before end date.")
     st.stop()
 
-# Fetch data for each ticker and combine
-combined_df = pd.DataFrame()
-for t in tickers:
-    try:
-        df = load_data(t, start_date, end_date)  # cached data fetch
-    except Exception:
-        st.error(f"Error fetching data for {t}.")
-        st.stop()
-    if df.empty:
-        st.warning(f"No data for {t} - skipping.")
-        continue
-    df['Ticker'] = t
-    df['Adj Close'] = df['Adj Close'].astype(float)
-    combined_df = pd.concat([combined_df, df[['Adj Close', 'Ticker']]])
+st.session_state.start_date = start_date
+st.session_state.end_date = end_date
 
-if combined_df.empty:
-    st.warning("No data available to compare with the given inputs.")
+log_scale = st.sidebar.checkbox("Log scale on performance chart", value=False)
+
+# ─── Global colour map (persistent) ──────────────────────────
+if "colour_map" not in st.session_state:
+    st.session_state.colour_map = {}
+colour_map: dict[str, str] = st.session_state.colour_map
+palette = px.colors.qualitative.Plotly
+
+for t in tickers:
+    if t not in colour_map:
+        colour_map[t] = palette[len(colour_map) % len(palette)]
+
+# ─── Fetch & combine data ────────────────────────────────────
+frames: list[pd.DataFrame] = []
+market_caps: dict[str, float | None] = {}
+
+with st.spinner("Fetching data …"):
+    for t in tickers:
+        df = load_data(t, start_date, end_date)
+        if df is None or df.empty:
+            st.warning(f"No data for {t} – skipping.")
+            continue
+
+        price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+        tmp = (
+            df[[price_col]]
+            .rename(columns={price_col: "Price"})
+            .dropna()
+            .assign(Ticker=t)
+            .reset_index()
+            .rename(columns={"index": "Date"})
+        )
+        frames.append(tmp)
+
+        # Market‑cap info (optional)
+        try:
+            info = yf.Ticker(t).info
+            market_caps[t] = info.get("marketCap")
+        except Exception:
+            market_caps[t] = None
+
+if not frames:
+    st.error("No data available for the selected tickers/date range.")
     st.stop()
 
-# Create a normalized price column for comparison (percentage or indexed to 100)
-# For each ticker, normalize prices to start at 100
-combined_df = combined_df.reset_index()
-combined_df.rename(columns={'index': 'Date'}, inplace=True)
-# Get start prices for each ticker
-start_prices = combined_df.groupby('Ticker').first()['Adj Close']
-combined_df['Normalized'] = combined_df.apply(lambda row: row['Adj Close'] / start_prices[row['Ticker']] * 100, axis=1)
+combined_df = pd.concat(frames, ignore_index=True)
+combined_df["Date"] = pd.to_datetime(combined_df["Date"])  # ensure datetime
 
-# Line chart of normalized performance
-fig = px.line(
-    combined_df, 
-    x="Date", 
-    y="Normalized", 
-    color="Ticker",
-    title="Normalized Performance Comparison",
-    labels={"Normalized": "Indexed Price (Start = 100)", "Date": "Date"}
+# ─── Normalise so all series start at 100 ─────────────────────
+start_prices = (
+    combined_df.sort_values("Date").groupby("Ticker")["Price"].first().to_dict()
 )
-fig.update_layout(legend_title_text="Ticker")
-st.plotly_chart(fig, use_container_width=True)
 
-# Calculate final return and volatility for each ticker
-comparison_metrics = []
+combined_df["Indexed"] = combined_df.apply(
+    lambda r: r["Price"] / start_prices[r["Ticker"]] * 100, axis=1
+)
+
+# ─── Chart: Normalised performance ───────────────────────────
+line_fig = px.line(
+    combined_df,
+    x="Date",
+    y="Indexed",
+    color="Ticker",
+    title="Normalised Performance (Start = 100)",
+    labels={"Indexed": "Indexed Price", "Date": "Date"},
+    color_discrete_map=colour_map,
+)
+line_fig.update_layout(legend_title_text="Ticker")
+if log_scale:
+    line_fig.update_yaxes(type="log")
+
+st.plotly_chart(line_fig, use_container_width=True)
+
+# ─── Summary metrics table ───────────────────────────────────
+summary: list[dict[str, float]] = []
 for t in tickers:
-    df_t = combined_df[combined_df['Ticker'] == t]
-    if df_t.empty: 
+    subset = combined_df[combined_df["Ticker"] == t].sort_values("Date")
+    if subset.empty:
         continue
-    start_val = df_t['Adj Close'].iloc[0]
-    end_val = df_t['Adj Close'].iloc[-1]
-    total_ret = (end_val / start_val - 1) * 100
-    # Compute volatility (daily std dev annualized) on that ticker's series
-    prices = df_t.sort_values("Date")['Adj Close']
-    daily_ret = prices.pct_change().dropna()
-    vol = daily_ret.std() * (252 ** 0.5) * 100
-    comparison_metrics.append([t, f"{total_ret:.2f}%", f"{vol:.2f}%"])
+    price_series = subset["Price"]
+    total_ret = (price_series.iloc[-1] / price_series.iloc[0] - 1) * 100
+    daily_ret = price_series.pct_change().dropna()
+    vol = daily_ret.std() * math.sqrt(252) * 100  # annualised %
+    summary.append(
+        {
+            "Ticker": t,
+            "Total Return (%)": round(total_ret, 2),
+            "Annual Volatility (%)": round(vol, 2),
+            "MarketCap": market_caps.get(t),
+        }
+    )
 
-if comparison_metrics:
-    comp_df = pd.DataFrame(comparison_metrics, columns=["Ticker", "Total Return (%)", "Annual Volatility (%)"])
-    comp_df.set_index("Ticker", inplace=True)
-    st.write("**Comparison Metrics:**", comp_df)
+summary_df = pd.DataFrame(summary).set_index("Ticker")
+
+st.write("### Comparison Metrics")
+st.dataframe(summary_df)
+
+# ─── Risk‑Return scatter plot ────────────────────────────────
+if not summary_df.empty:
+    scatter_fig = px.scatter(
+        summary_df.reset_index(),
+        x="Annual Volatility (%)",
+        y="Total Return (%)",
+        size="MarketCap",
+        color="Ticker",
+        hover_name="Ticker",
+        size_max=60,
+        title="Risk‑Return (Bubble ~ Market Cap)",
+        color_discrete_map=colour_map,
+    )
+    st.plotly_chart(scatter_fig, use_container_width=True)
+
+# ─── Correlation heat‑map of returns ─────────────────────────
+with st.expander("Correlation Matrix", expanded=False):
+    # Build return matrix
+    ret_frames: list[pd.Series] = []
+    for t in tickers:
+        px_sub = combined_df[combined_df["Ticker"] == t].set_index("Date")["Price"]
+        ret_frames.append(px_sub.pct_change().rename(t))
+
+    ret_df = pd.concat(ret_frames, axis=1).dropna(how="all")
+    if ret_df.shape[1] >= 2:
+        corr = ret_df.corr()
+        heat = px.imshow(
+            corr,
+            text_auto=".2f",
+            color_continuous_scale="RdBu",
+            zmin=-1,
+            zmax=1,
+            title="Return Correlation Matrix",
+        )
+        st.plotly_chart(heat, use_container_width=True)
+    else:
+        st.info("Not enough overlapping data to compute correlations.")

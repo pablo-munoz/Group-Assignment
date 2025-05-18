@@ -7,7 +7,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
-
+import plotly.express as px
 from utils import load_data
 
 st.set_page_config(page_title="Key Statistics", page_icon="📊")
@@ -75,3 +75,24 @@ st.write(
     f"Summary for **{ticker}** ({start_date} → {end_date})",
     metrics_df
 )
+hist_fig = px.histogram(
+    daily_ret * 100,
+    nbins=40,
+    title="Distribution of Daily Returns (%)",
+    labels={"value": "Daily Return (%)"},
+    opacity=0.75,
+)
+st.plotly_chart(hist_fig, use_container_width=True)
+
+# ─── Explanations – cognitive redundancy ────────────────────
+with st.expander("What do these numbers mean?", expanded=False):
+    st.markdown(
+        """
+* **Return** – percentage gain/loss over the selected period.
+* **Volatility** – annualised standard deviation of daily returns; higher ⇒ wider swings.
+* **Max Drawdown** – worst peak-to-trough decline; proxy for tail-risk.
+* **Sharpe Ratio** – excess return per unit of total volatility (> 1 is generally ‘good’).
+* **Sortino Ratio** – like Sharpe but only penalises downside moves.
+* **Beta** – sensitivity to S&P 500 (β=1 tracks the market, >1 is more volatile).
+        """
+    )
